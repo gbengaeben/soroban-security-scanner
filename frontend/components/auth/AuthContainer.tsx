@@ -6,6 +6,16 @@ import SignUpForm from './SignUpForm';
 import PasswordResetForm from './PasswordResetForm';
 import MultiFactorAuth from './MultiFactorAuth';
 import { AlertCircle, CheckCircle } from 'lucide-react';
+import { persistSession } from '../../lib/auth/session';
+import {
+  login,
+  signUp,
+  resetPassword,
+  sendMfaCode,
+  resendMfaCode,
+  verifyMfa,
+  getPendingMfaCode,
+} from '../../lib/auth/authService';
 
 type AuthView = 'login' | 'signup' | 'reset-password' | 'mfa';
 
@@ -14,13 +24,19 @@ interface AuthContainerProps {
   initialView?: AuthView;
 }
 
-export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: AuthContainerProps) {
+export default function AuthContainer({
+  onAuthSuccess,
+  initialView = 'login',
+}: AuthContainerProps) {
   const [currentView, setCurrentView] = useState<AuthView>(initialView);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState('');
   const [userPhone, setUserPhone] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
+  // The one-time code the mock MFA flow "sent", shown only in demo mode.
+  const [demoMfaCode, setDemoMfaCode] = useState<string | null>(null);
 
   const clearMessages = () => {
     setError(null);
@@ -37,72 +53,28 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
     setError(null);
   };
 
-  // Mock authentication functions - replace with actual API calls
-  const mockLogin = async (credentials: { email: string; password: string; rememberMe: boolean }) => {
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // Mock validation
-    if (credentials.email === 'demo@example.com' && credentials.password === 'password123') {
-      setUserEmail(credentials.email);
-      return { user: { email: credentials.email, name: 'Demo User' }, requiresMfa: true };
-    }
-    throw new Error('Invalid email or password');
-  };
-
-  const mockSignUp = async (userData: { firstName: string; lastName: string; email: string; password: string }) => {
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Mock validation
-    if (userData.email === 'existing@example.com') {
-      throw new Error('An account with this email already exists');
-    }
-    
-    setUserEmail(userData.email);
-    return { user: { email: userData.email, name: `${userData.firstName} ${userData.lastName}` } };
-  };
-
-  const mockResetPassword = async (email: string) => {
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // Mock validation
-    if (email === 'notfound@example.com') {
-      throw new Error('No account found with this email address');
-    }
-    
-    return { success: true };
-  };
-
-  const mockVerifyMfa = async (code: string, method: string) => {
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // Mock validation
-    if (code === '123456') {
-      return { verified: true };
-    }
-    throw new Error('Invalid verification code');
-  };
-
-  const mockResendMfaCode = async (method: string) => {
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 500));
-    return { success: true };
-  };
-
-  const handleLogin = async (credentials: { email: string; password: string; rememberMe: boolean }) => {
+  const handleLogin = async (credentials: {
+    email: string;
+    password: string;
+    rememberMe: boolean;
+  }) => {
     clearMessages();
     setIsLoading(true);
-    
+    setRememberMe(credentials.rememberMe);
+
     try {
-      const result = await mockLogin(credentials);
-      
+      const result = await login(credentials);
+
       if (result.requiresMfa) {
+        setUserEmail(result.user.email);
+        // Simulate the backend sending a one-time code, then surface it
+        // so the demo flow can be completed.
+        await sendMfaCode('totp');
+        setDemoMfaCode(getPendingMfaCode());
         setCurrentView('mfa');
         handleSuccess('Login successful! Please complete two-factor authentication.');
       } else {
+        persistSession(result.user, credentials.rememberMe);
         handleSuccess('Login successful!');
         onAuthSuccess?.(result.user);
       }
@@ -113,13 +85,20 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
     }
   };
 
-  const handleSignUp = async (userData: { firstName: string; lastName: string; email: string; password: string }) => {
+  const handleSignUp = async (userData: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    password: string;
+  }) => {
     clearMessages();
     setIsLoading(true);
-    
+
     try {
-      const result = await mockSignUp(userData);
-      handleSuccess('Account created successfully! Please check your email to verify your account.');
+      await signUp(userData);
+      handleSuccess(
+        'Account created successfully! Please check your email to verify your account.'
+      );
       // Optionally redirect to login or show verification screen
       setTimeout(() => setCurrentView('login'), 2000);
     } catch (err) {
@@ -132,9 +111,9 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
   const handleResetPassword = async (email: string) => {
     clearMessages();
     setIsLoading(true);
-    
+
     try {
-      await mockResetPassword(email);
+      await resetPassword(email);
       handleSuccess('Password reset link sent successfully!');
     } catch (err) {
       handleError(err instanceof Error ? err.message : 'Password reset failed');
@@ -146,11 +125,14 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
   const handleMfaVerify = async (code: string, method: string) => {
     clearMessages();
     setIsLoading(true);
-    
+
     try {
-      const result = await mockVerifyMfa(code, method);
+      await verifyMfa(code, method);
+      const user = { email: userEmail, verified: true };
+      persistSession(user, rememberMe);
+      setDemoMfaCode(null);
       handleSuccess('Authentication successful!');
-      onAuthSuccess?.({ email: userEmail, verified: true });
+      onAuthSuccess?.(user);
     } catch (err) {
       handleError(err instanceof Error ? err.message : 'Verification failed');
     } finally {
@@ -161,9 +143,10 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
   const handleResendCode = async (method: string) => {
     clearMessages();
     setIsLoading(true);
-    
+
     try {
-      await mockResendMfaCode(method);
+      await resendMfaCode(method);
+      setDemoMfaCode(getPendingMfaCode());
       handleSuccess(`New code sent via ${method}`);
     } catch (err) {
       handleError(err instanceof Error ? err.message : 'Failed to resend code');
@@ -183,7 +166,7 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
             isLoading={isLoading}
           />
         );
-      
+
       case 'signup':
         return (
           <SignUpForm
@@ -192,7 +175,7 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
             isLoading={isLoading}
           />
         );
-      
+
       case 'reset-password':
         return (
           <PasswordResetForm
@@ -201,7 +184,7 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
             isLoading={isLoading}
           />
         );
-      
+
       case 'mfa':
         return (
           <MultiFactorAuth
@@ -210,10 +193,11 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
             onResendCode={handleResendCode}
             userEmail={userEmail}
             userPhone={userPhone}
+            demoCode={demoMfaCode}
             isLoading={isLoading}
           />
         );
-      
+
       default:
         return null;
     }
@@ -229,7 +213,7 @@ export default function AuthContainer({ onAuthSuccess, initialView = 'login' }: 
             <p className="text-sm text-red-700">{error}</p>
           </div>
         )}
-        
+
         {success && (
           <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center">
             <CheckCircle className="h-5 w-5 text-green-600 mr-2 flex-shrink-0" />
